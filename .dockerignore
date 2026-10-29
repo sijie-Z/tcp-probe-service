@@ -1,0 +1,41 @@
+# Docker 构建上下文排除清单：镜像运行时只需要 app/ 与 requirements.txt
+
+# ---- 版本控制 ----
+.git
+.gitignore
+
+# ---- 与运行无关的开发 / 测试资产 ----
+tests/
+docs/
+scripts/
+requirements-dev.txt
+pyproject.toml
+Makefile
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# ---- Python 字节码 / 虚拟环境 / 测试缓存 ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 本地配置与密钥（.env.example 仅供文档参考，镜像内不需要）----
+.env
+.env.*
+
+# ---- 临时产物与日志 ----
+.scratch/
+*.log
+
+# ---- 编辑器 / 系统文件 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

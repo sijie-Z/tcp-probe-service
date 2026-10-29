@@ -1,0 +1,32 @@
+# 单服务编排：docker compose up -d 后台拉起，docker compose down 停止并清理。
+# 全部配置项都有默认值，这里只显式给出几个常用项作为示例，其余见 .env.example
+services:
+  tcp-probe:
+    build: .
+    image: tcp-probe-service:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # 让容器内的服务能访问宿主机上的监听端口，配合冒烟测试的容器模式：
+    #   make smoke SMOKE_ARGS="--target-host host.docker.internal"
+    # Docker Desktop 自带该域名解析；Linux 下靠这里注入网关地址
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # 日志级别：DEBUG / INFO / WARNING / ERROR / CRITICAL
+      LOG_LEVEL: "INFO"
+      # 令牌桶：每秒补充的令牌数，即稳态请求速率上限（QPS）
+      RATE_LIMIT_RPS: "5"
+      # 令牌桶：桶容量，即短时间内允许的突发请求数
+      RATE_LIMIT_BURST: "10"
+      # 单个目标未显式指定 timeout_ms 时的默认探测超时（毫秒）
+      PROBE_DEFAULT_TIMEOUT_MS: "3000"
+      # 单个探测任务允许的最大目标数
+      TASK_MAX_TARGETS: "200"
+    healthcheck:
+      # 与 Dockerfile 中的 HEALTHCHECK 保持一致：标准库请求 /healthz
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
