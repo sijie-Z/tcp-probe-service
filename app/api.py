@@ -137,7 +137,8 @@ class RateLimitMiddleware:
         key = client[0] if client else "unknown"
         allowed, retry_after = self.limiter.check(key)
         if not allowed:
-            retry_seconds = max(1, math.ceil(retry_after))
+            # 上限 3600 秒：防止极小 rps 配置把 math.ceil 推到溢出
+            retry_seconds = max(1, math.ceil(min(retry_after, 3600.0)))
             request_id = str(scope.get("state", {}).get("request_id") or "") or uuid.uuid4().hex
             response = _error_response(
                 429,
@@ -202,9 +203,15 @@ def _register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def on_unhandled(_request: Request, _exc: Exception) -> JSONResponse:
+    async def on_unhandled(request: Request, _exc: Exception) -> JSONResponse:
+        # 该 handler 由最外层的 ServerErrorMiddleware 调用：此时请求中间件已退出、
+        # ContextVar 已复位，且 500 响应不经过中间件的 send 包装。因此 request_id
+        # 必须从 scope state 读取，并显式写入响应头，保证链路可关联。
+        rid = str(getattr(request.state, "request_id", "") or request_id())
         logger.exception("unhandled_error")
-        return _error_response(500, "INTERNAL_ERROR", "服务内部错误", request_id())
+        return _error_response(
+            500, "INTERNAL_ERROR", "服务内部错误", rid, headers={"X-Request-ID": rid}
+        )
 
 
 def _register_routes(
@@ -233,6 +240,7 @@ def _register_routes(
         "/api/v1/tasks",
         response_model=Task,
         status_code=202,
+        responses={200: {"model": Task, "description": "wait=true 且任务在等待窗口内完成"}},
         tags=["任务"],
         summary="创建探测任务（批量，可选同步等待）",
     )

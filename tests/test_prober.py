@@ -170,3 +170,29 @@ def test_probe_propagates_cancelled_error(monkeypatch: pytest.MonkeyPatch) -> No
         assert task.cancelled()
 
     asyncio.run(scenario())
+
+
+def test_closed_does_not_mask_open_on_other_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """多地址场景：先拒绝的地址不能短路掉后续可达地址（open 优先级更高）。"""
+    try:
+        infos = socket.getaddrinfo("localhost", 80, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        pytest.skip("当前环境无法解析 localhost")
+    if len({info[4][0] for info in infos}) < 2:
+        pytest.skip("当前环境 localhost 只解析出单一地址，无法构造多地址场景")
+
+    calls: list[str] = []
+
+    async def fake_connect(family, socktype, proto, sockaddr, timeout_seconds):
+        calls.append(str(sockaddr[0]))
+        if len(calls) == 1:
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        return socket.socket(family, socktype, proto)
+
+    monkeypatch.setattr(prober, "_connect_once", fake_connect)
+
+    result = asyncio.run(probe_tcp("localhost", 80, 3000))
+
+    assert len(calls) >= 2, "closed 之后必须继续尝试其余地址"
+    assert result.status is TargetStatus.OPEN
+    assert result.resolved_ip == calls[1]

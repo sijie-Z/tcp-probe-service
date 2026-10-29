@@ -4,6 +4,7 @@ services:
   tcp-probe:
     build: .
     image: tcp-probe-service:latest
+    # env_file: .env  # 如需从 .env 注入配置，取消本行注释（默认全部使用内置默认值）
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -25,7 +26,7 @@ services:
       TASK_MAX_TARGETS: "200"
     healthcheck:
       # 与 Dockerfile 中的 HEALTHCHECK 保持一致：标准库请求 /healthz
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8000/healthz', timeout=3)"]
       interval: 30s
       timeout: 5s
       start_period: 10s

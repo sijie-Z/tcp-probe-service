@@ -108,6 +108,29 @@ def test_cancel_before_task_starts_finalizes_terminal_state(monkeypatch) -> None
     ]
 
 
+def test_cancel_is_idempotent(monkeypatch) -> None:
+    """重复取消已取消的任务应直接返回当前快照，而不是 409。"""
+
+    async def slow_probe(host: str, port: int, timeout_ms: int) -> TargetResult:
+        await asyncio.sleep(30)
+        return TargetResult(host=host, port=port, status=TargetStatus.OPEN)
+
+    monkeypatch.setattr(service_module, "probe_tcp", slow_probe)
+
+    async def scenario():
+        service = _service()
+        task = service.submit(_request(_target("a")))
+        await asyncio.sleep(0.02)
+        first = await service.cancel(task.id)
+        second = await service.cancel(task.id)
+        return first, second
+
+    first, second = _run(scenario())
+    assert first.status is TaskStatus.CANCELLED
+    assert second.status is TaskStatus.CANCELLED
+    assert second.completed == second.total
+
+
 def test_wait_for_returns_running_snapshot_on_timeout(monkeypatch) -> None:
     async def slow_probe(host: str, port: int, timeout_ms: int) -> TargetResult:
         await asyncio.sleep(30)

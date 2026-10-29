@@ -8,17 +8,13 @@
 
 from __future__ import annotations
 
-import ipaddress
-import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
-_HOSTNAME_RE = re.compile(
-    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$"
-)
+from app.host import validate_host
 
 
 class TargetStatus(str, Enum):
@@ -49,18 +45,8 @@ class TaskStatus(str, Enum):
 
 
 def _validate_host(value: str) -> str:
-    """接受主机名或 IP 字面量（含带方括号的 IPv6 写法）。"""
-    candidate = value.strip()
-    bracketed = candidate.startswith("[") and candidate.endswith("]")
-    literal = candidate[1:-1] if bracketed else candidate
-    try:
-        ipaddress.ip_address(literal)
-        return candidate
-    except ValueError:
-        pass
-    if not _HOSTNAME_RE.match(candidate):
-        raise ValueError("host 不是合法的主机名或 IP 地址")
-    return candidate
+    """接受主机名或 IP 字面量（规则见 app.host）。"""
+    return validate_host(value)
 
 
 class ProbeTarget(BaseModel):
@@ -71,9 +57,9 @@ class ProbeTarget(BaseModel):
     host: Annotated[
         str, Field(min_length=1, max_length=253, description="主机名或 IP 字面量（IPv4/IPv6）")
     ]
-    port: Annotated[int, Field(ge=1, le=65535, description="TCP 端口（1-65535）")]
+    port: Annotated[StrictInt, Field(ge=1, le=65535, description="TCP 端口（1-65535）")]
     timeout_ms: Annotated[
-        int | None,
+        StrictInt | None,
         Field(
             default=None,
             ge=1,

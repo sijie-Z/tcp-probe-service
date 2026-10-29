@@ -205,8 +205,61 @@ def test_rate_limit_429_and_healthz_exempt() -> None:
 
         response = rate_limited_client.post("/api/v1/tasks", json=payload)
         assert response.status_code == 429
-        assert response.json()["error"]["code"] == "RATE_LIMITED"
+        body = response.json()
+        assert body["error"]["code"] == "RATE_LIMITED"
         assert "Retry-After" in response.headers
+        # 429 也必须带 X-Request-ID，且与响应体一致
+        assert response.headers["X-Request-ID"] == body["error"]["request_id"]
 
         for _ in range(5):
             assert rate_limited_client.get("/healthz").status_code == 200
+
+
+def test_capacity_backpressure_returns_503_with_retry_after() -> None:
+    app = create_app(_settings(task_max_active=1))
+    slow_payload = {"targets": [{"host": "192.0.2.1", "port": 80, "timeout_ms": 5000}]}
+    with TestClient(app) as busy_client:
+        assert busy_client.post("/api/v1/tasks", json=slow_payload).status_code == 202
+        response = busy_client.post("/api/v1/tasks", json=slow_payload)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "TASK_CAPACITY_EXCEEDED"
+    assert response.headers["Retry-After"] == "2"
+
+
+def test_validation_rejects_bool_port(client: TestClient) -> None:
+    # Pydantic 默认 lax 模式会把 true 当成 1，必须显式拒绝
+    response = client.post(
+        "/api/v1/tasks", json={"targets": [{"host": "127.0.0.1", "port": True}]}
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+def test_delete_is_idempotent_for_cancelled_task(client: TestClient) -> None:
+    payload = {"targets": [{"host": "192.0.2.1", "port": 80, "timeout_ms": 5000}]}
+    task_id = client.post("/api/v1/tasks", json=payload).json()["id"]
+
+    first = client.delete(f"/api/v1/tasks/{task_id}")
+    assert first.status_code == 200
+    assert first.json()["status"] == "cancelled"
+
+    second = client.delete(f"/api/v1/tasks/{task_id}")
+    assert second.status_code == 200
+    assert second.json()["status"] == "cancelled"
+
+
+def test_unhandled_error_returns_envelope_with_request_id() -> None:
+    app = create_app(_settings())
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    with TestClient(app, raise_server_exceptions=False) as error_client:
+        response = error_client.get("/boom", headers={"X-Request-ID": "trace-500"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert body["error"]["request_id"] == "trace-500"
+    assert response.headers["X-Request-ID"] == "trace-500"

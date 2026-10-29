@@ -29,10 +29,11 @@ curl http://127.0.0.1:8000/healthz
 
 ```bash
 python -m venv .venv
-# Windows (PowerShell): .venv\Scripts\Activate.ps1
-# macOS / Linux / Git Bash: source .venv/bin/activate
-pip install -r requirements.txt
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Windows Git Bash:   source .venv/Scripts/activate
+# macOS / Linux:      source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 ```
 
 启动后：
@@ -87,26 +88,30 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/tasks?wait=true&wait_timeout_ms=8000'
     {"host": "example.com", "port": 443, "status": "open",
      "resolved_ip": "93.184.216.34", "latency_ms": 23.4, "error": null},
     {"host": "127.0.0.1", "port": 22, "status": "closed",
-     "resolved_ip": "127.0.0.1", "latency_ms": null, "error": "connection refused"},
+     "resolved_ip": "127.0.0.1", "latency_ms": null, "error": "connection_refused: 127.0.0.1:22"},
     {"host": "no-such-host.invalid", "port": 80, "status": "dns_error",
-     "resolved_ip": null, "latency_ms": null, "error": "dns resolution failed: [Errno -2] ..."}
+     "resolved_ip": null, "latency_ms": null,
+     "error": "dns_error: no-such-host.invalid: [Errno 11001] getaddrinfo failed"}
   ],
-  "created_at": "2026-10-29T09:00:00.000000+00:00",
-  "started_at": "2026-10-29T09:00:00.001000+00:00",
-  "finished_at": "2026-10-29T09:00:00.180000+00:00",
+  "created_at": "2026-10-29T09:00:00.000000Z",
+  "started_at": "2026-10-29T09:00:00.001000Z",
+  "finished_at": "2026-10-29T09:00:00.180000Z",
   "error": null
 }
 ```
 
-限流效果（默认突发 10、每秒补充 5；连续快速请求在突发耗尽后开始 429）：
+限流效果（默认突发 10、每秒补充 5）：
 
 ```bash
-for i in $(seq 1 12); do
+for i in $(seq 1 30); do
   curl -s -o /dev/null -w '%{http_code}\n' -X POST 'http://127.0.0.1:8000/api/v1/tasks' \
     -H 'Content-Type: application/json' -d '{"targets":[{"host":"127.0.0.1","port":22}]}'
 done
-# 先出现若干 202（突发额度），随后出现 429
+# 先出现若干 202（突发额度），随后出现 429 与 Retry-After
 ```
+
+> 注意：每次 `curl` 进程启动约百毫秒，期间令牌桶按 5 rps 持续补充，所以实际要多发一些才会出现 429；
+> 想要确定性地验证限流，直接跑 `scripts/smoke_test.py` 的限流步骤（同进程快速连发，突发耗尽即 429）。
 
 ## API
 
@@ -128,7 +133,7 @@ done
 | `targets[].port` | int(1..65535) | 是 | TCP 端口 |
 | `targets[].timeout_ms` | int(1..10000) | 否 | 单目标超时，缺省 3000；不得超过服务端上限 |
 
-**统一错误信封**（所有非 2xx）：
+**统一错误信封**（所有 4xx/5xx；307 尾斜杠重定向为空 body）：
 
 ```json
 {
@@ -169,7 +174,7 @@ done
 
 ## 配置项
 
-全部通过环境变量覆盖（12-factor），默认值开箱即用；`probe.*` 对应环境变量见 [.env.example](.env.example)。
+全部通过环境变量覆盖（12-factor），默认值开箱即用；配置项与对应环境变量见 [.env.example](.env.example)。
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -209,8 +214,9 @@ python -m pytest
 覆盖：探测状态分类（真实本地监听器：open/closed/dns_error/invalid/timeout）、令牌桶数学与内存回收（可注入时钟）、任务编排（顺序、取消、背压、关停）、HTTP 层（状态码、错误信封、`X-Request-ID`、429 + `Retry-After`、异步轮询）。测试不依赖外网。
 
 > 环境说明：`closed` 依赖系统对未监听端口回 RST。若机器上防火墙 stealth 模式或代理软件
-> **延迟**送达 RST（实测某安全软件延迟约 2 秒），测试与冒烟脚本为 closed 目标预留 5 秒
-> 预算，断言仍为严格的 `closed`；若环境彻底静默丢包，返回 `timeout` 同样是诚实结果。
+> **延迟**送达 RST（实测某安全软件延迟约 2 秒），测试与冒烟脚本为 closed 目标预留了大于
+> 延迟窗口的预算（集成测试默认 3000ms、冒烟脚本 5000ms），断言仍为严格的 `closed`；
+> 若环境彻底静默丢包，返回 `timeout` 同样是诚实结果。
 
 ## 目录结构
 

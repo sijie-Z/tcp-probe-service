@@ -9,9 +9,10 @@
     「按已收集的结论收敛」——没有明确结论则记为 timeout。
 
 状态优先级
-    open > closed > timeout > unreachable。closed 一旦出现即为最终结论（主机
-    可达、端口明确拒绝），无需继续尝试其余地址；dns_error / invalid 是提前
-    返回的确定性失败；error 仅用于未预期异常的兜底。
+    open > closed > timeout > unreachable。closed 只证明「该地址上端口明确拒绝」，
+    记为最佳证据后继续尝试其余地址（多 A/AAAA 记录场景下后续地址仍可能 open），
+    最终没有 open 时才返回 closed；dns_error / invalid 是提前返回的确定性失败；
+    error 仅用于未预期异常的兜底。
 
 延迟口径
     latency_ms 只统计 TCP 握手阶段（``time.perf_counter``），不含 DNS 解析，
@@ -28,11 +29,10 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
-import re
 import socket
 import time
 
+from app.host import HOSTNAME_RE, ip_literal
 from app.models import TargetResult, TargetStatus
 
 _MAX_ADDRINFOS = 8
@@ -40,22 +40,8 @@ _MAX_ADDRINFOS = 8
 _SockAddr = tuple[str, int] | tuple[str, int, int, int]
 _AddrInfo = tuple[int, int, int, str, _SockAddr]
 
-# 与 app.models 的主机名校验规则保持一致：probe_tcp 可能被绕过 Pydantic 直接
-# 调用，入口处必须独立完成同样的校验。
-_HOSTNAME_RE = re.compile(
-    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$"
-)
-
-
-def _ip_literal(candidate: str) -> str | None:
-    """识别 IP 字面量（兼容 ``[::1]`` 方括号写法），返回去括号后的地址串。"""
-    bracketed = candidate.startswith("[") and candidate.endswith("]")
-    literal = candidate[1:-1] if bracketed else candidate
-    try:
-        ipaddress.ip_address(literal)
-    except ValueError:
-        return None
-    return literal
+# 校验规则与 Pydantic 模型共用 app.host，避免两处漂移；probe_tcp 可能被绕过
+# Pydantic 直接调用，入口处仍须独立校验。
 
 
 def _invalid_reason(host: object, port: object) -> str | None:
@@ -69,7 +55,7 @@ def _invalid_reason(host: object, port: object) -> str | None:
     candidate = host.strip()
     if not candidate:
         return "invalid_host: host 不能为空"
-    if _ip_literal(candidate) is None and not _HOSTNAME_RE.match(candidate):
+    if ip_literal(candidate) is None and not HOSTNAME_RE.match(candidate):
         return f"invalid_host: {candidate!r} 不是合法的 IP 或主机名"
     if isinstance(port, bool) or not isinstance(port, int):
         return "invalid_port: port 必须是整数"
@@ -148,15 +134,15 @@ async def probe_tcp(host: str, port: int, timeout_ms: int) -> TargetResult:
     状态判定（优先级 open > closed > timeout > unreachable）
         - open：TCP 三次握手成功。latency_ms 只计握手阶段
           （``time.perf_counter``），不含 DNS；resolved_ip 为成功连接的地址。
-        - closed：任一地址返回 ECONNREFUSED——主机可达、端口明确拒绝，是
-          确定性结论，立即返回，不再尝试其余地址。
+        - closed：任一地址返回 ECONNREFUSED——主机可达、端口明确拒绝；记为
+          best-so-far 继续尝试其余地址，最终无 open 时返回 closed。
         - timeout：预算内没有任何地址给出明确答复，且至少一个地址尝试超时。
         - dns_error：主机名解析失败（``socket.gaierror`` / 空解析结果），
           立即返回。
         - unreachable：网络层明确不可达（ENETUNREACH / EHOSTUNREACH /
           EHOSTDOWN / ENETDOWN、ConnectionResetError 等 OSError）。
         - invalid：host/port 非法，不发起任何网络 I/O；规则与
-          ``app.models._validate_host`` 一致（strip、[::1] 方括号 IPv6、
+          ``app.host.validate_host`` 一致（strip、[::1] 方括号 IPv6、
           IP 字面量或主机名正则；port ∈ 1-65535）。
         - error：未预期异常兜底，应几乎不出现。
 
@@ -187,7 +173,7 @@ async def probe_tcp(host: str, port: int, timeout_ms: int) -> TargetResult:
         # 预算从函数进入时刻算起，校验耗掉的少量时间同样计入。
         deadline = entry + timeout_ms / 1000.0
         loop = asyncio.get_running_loop()
-        literal = _ip_literal(host_text)
+        literal = ip_literal(host_text)
         if literal is not None:
             if ":" in literal:
                 family = socket.AF_INET6
@@ -239,6 +225,7 @@ async def probe_tcp(host: str, port: int, timeout_ms: int) -> TargetResult:
         first_ip: str | None = None
         attempts = 0
         saw_timeout = False
+        first_refused_ip: str | None = None
         first_unreachable_error: str | None = None
 
         for family, socktype, proto, _canonname, sockaddr in addr_infos[:_MAX_ADDRINFOS]:
@@ -255,14 +242,11 @@ async def probe_tcp(host: str, port: int, timeout_ms: int) -> TargetResult:
             except Exception as exc:
                 status = classify_socket_error(exc)
                 if status is TargetStatus.CLOSED:
-                    # 主机可达 + 端口明确拒绝 = 确定性结论，无需尝试其余地址。
-                    return TargetResult(
-                        host=host_text,
-                        port=port,
-                        status=TargetStatus.CLOSED,
-                        resolved_ip=first_ip,
-                        error=f"connection_refused: {ip}:{port}",
-                    )
+                    # closed 只证明「该地址未监听」，不排除其他地址可达：
+                    # 记为 best-so-far 继续尝试，最终按 open > closed 收敛。
+                    if first_refused_ip is None:
+                        first_refused_ip = ip
+                    continue
                 if status is TargetStatus.TIMEOUT:
                     saw_timeout = True
                     continue
@@ -288,7 +272,16 @@ async def probe_tcp(host: str, port: int, timeout_ms: int) -> TargetResult:
                 latency_ms=latency_ms,
             )
 
-        # 优先级：timeout 高于 unreachable；两者皆无则说明预算在首次尝试前耗尽。
+        # 优先级：open（循环内已返回）> closed > timeout > unreachable；
+        # 皆无则说明预算在首次尝试前耗尽。
+        if first_refused_ip is not None:
+            return TargetResult(
+                host=host_text,
+                port=port,
+                status=TargetStatus.CLOSED,
+                resolved_ip=first_refused_ip,
+                error=f"connection_refused: {first_refused_ip}:{port}",
+            )
         if saw_timeout:
             return TargetResult(
                 host=host_text,

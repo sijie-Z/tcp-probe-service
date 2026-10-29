@@ -27,7 +27,7 @@ EXPOSE 8000
 # 存活探针：仅用标准库请求 /healthz；连接失败或非 2xx 时 urlopen 抛异常，
 # 进程退出码非 0，容器被标记为 unhealthy
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8000/healthz', timeout=3)"]
 
 # 固定监听 8000；如需换端口，请同步调整 EXPOSE、compose 端口映射与健康检查
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

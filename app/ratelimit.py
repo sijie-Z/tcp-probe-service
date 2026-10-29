@@ -4,10 +4,10 @@
 - 连续补充：每个桶只记录当前令牌数与上次结算时刻，任意时刻的令牌数为
   ``min(capacity, tokens + elapsed * rps)``，无需后台定时器；
 - 独立桶：不同 key 互不影响，新 key 以满桶创建，允许 ``burst`` 次突发；
-- 内存治理：key 可能来自不可信输入（如客户端 IP），字典不能无限增长。每次 check
-  维护计数器，每 1024 次 check 或桶数量超过 4096 时触发一次惰性清扫，回收
-  ``now - last_seen > idle_ttl_seconds`` 的空闲桶；活跃 key 在 check 时刷新
-  last_seen，不会被误删。
+- 内存治理：key 可能来自不可信输入（如客户端 IP），字典不能无限增长。每 1024 次
+  check 或桶数量超过 4096 时触发惰性清扫（两次清扫至少间隔 1 秒，避免桶数超阈值后
+  每个请求都做全表扫描），回收 ``now - last_seen > idle_ttl_seconds`` 的空闲桶；
+  桶数另有 10 万硬上限，超出时按 last_seen 淘汰最久未活跃的 key。
 
 并发前提：实例仅支持在单个事件循环（单线程）内由 HTTP 中间件同步调用；所有状态读写
 都发生在同一线程，因此不引入锁。多线程或多进程共享同一实例不在支持范围内。
@@ -15,12 +15,15 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 _SWEEP_CHECK_INTERVAL = 1024
 _SWEEP_KEY_THRESHOLD = 4096
+_SWEEP_MIN_INTERVAL_SECONDS = 1.0  # 两次自动清扫的最小间隔
+_MAX_TRACKED_KEYS = 100_000  # 桶数量硬上限，超出按最久未活跃淘汰
 
 
 class TokenBucket:
@@ -103,12 +106,12 @@ class RateLimiter:
         idle_ttl_seconds: float = 600.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if rps <= 0:
-            raise ValueError(f"rps 必须大于 0，当前为 {rps}")
+        if rps <= 0 or not math.isfinite(rps):
+            raise ValueError(f"rps 必须是有限正数，当前为 {rps}")
         if burst < 1:
             raise ValueError(f"burst 必须大于等于 1，当前为 {burst}")
-        if idle_ttl_seconds <= 0:
-            raise ValueError(f"idle_ttl_seconds 必须大于 0，当前为 {idle_ttl_seconds}")
+        if idle_ttl_seconds <= 0 or not math.isfinite(idle_ttl_seconds):
+            raise ValueError(f"idle_ttl_seconds 必须是有限正数，当前为 {idle_ttl_seconds}")
 
         self._rps = float(rps)
         self._burst = int(burst)
@@ -116,6 +119,7 @@ class RateLimiter:
         self._clock = clock
         self._buckets: dict[str, _BucketEntry] = {}
         self._checks_since_sweep = 0
+        self._last_sweep = self._clock()
 
     def check(self, key: str) -> tuple[bool, float]:
         """对 key 做一次限流判定，返回 (是否放行, 建议的重试等待秒数)。
@@ -135,10 +139,12 @@ class RateLimiter:
         retry_after = 0.0 if allowed else entry.bucket.retry_after(now)
 
         self._checks_since_sweep += 1
-        if (
+        due = (
             self._checks_since_sweep >= _SWEEP_CHECK_INTERVAL
             or len(self._buckets) > _SWEEP_KEY_THRESHOLD
-        ):
+        )
+        # 冷却窗口：桶数超阈值后不能每个请求都做 O(n) 清扫
+        if due and now - self._last_sweep >= _SWEEP_MIN_INTERVAL_SECONDS:
             self._sweep(now)
         return allowed, retry_after
 
@@ -157,6 +163,7 @@ class RateLimiter:
 
     def _sweep(self, now: float) -> int:
         self._checks_since_sweep = 0
+        self._last_sweep = now
         stale = [
             key
             for key, entry in self._buckets.items()
@@ -164,4 +171,10 @@ class RateLimiter:
         ]
         for key in stale:
             del self._buckets[key]
+        if len(self._buckets) > _MAX_TRACKED_KEYS:
+            # 硬上限：攻击者可以无限轮换来源 IP，空闲清扫防不住全部增长，
+            # 超限时按最近活跃时间淘汰最旧的部分，保证内存有界
+            ordered = sorted(self._buckets.items(), key=lambda item: item[1].last_seen)
+            for key, _entry in ordered[: len(self._buckets) - _MAX_TRACKED_KEYS]:
+                del self._buckets[key]
         return len(stale)

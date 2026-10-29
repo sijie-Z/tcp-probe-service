@@ -48,11 +48,12 @@ class TaskStore:
         return len(self._tasks)
 
     def _is_expired(self, task: Task) -> bool:
-        return (
-            task.is_terminal
-            and task.finished_at is not None
-            and self._clock() - task.finished_at.timestamp() > self._ttl
-        )
+        if not task.is_terminal:
+            return False
+        # 终态却缺 finished_at（外部直接调用 add 才可能发生）按“刚结束”处理，
+        # 避免既不过期、又在容量淘汰中排最前的矛盾语义。
+        finished_ts = task.finished_at.timestamp() if task.finished_at else self._clock()
+        return self._clock() - finished_ts > self._ttl
 
     def _sweep_expired(self) -> None:
         expired = [task_id for task_id, task in self._tasks.items() if self._is_expired(task)]

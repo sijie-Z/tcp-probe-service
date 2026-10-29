@@ -116,13 +116,21 @@ class ProbeService:
         task = self._store.get(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
+        if task.status is TaskStatus.CANCELLED:
+            return task  # 幂等：重复取消已取消的任务直接返回当前快照
         if task.is_terminal:
             raise TaskAlreadyFinishedError(task_id)
         running = self._running.get(task_id)
         if running is not None:
             running.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await running
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                # 区分「子任务被取消」与「调用方自己也被取消」（关停场景）：
+                # 后者必须继续向上传播，不能吞掉。
+                if current is not None and getattr(current, "cancelling", lambda: 0)() > 0:
+                    raise
         self._finalize_cancelled(task)
         return task
 
@@ -160,16 +168,22 @@ class ProbeService:
     async def _run(self, task: Task, targets: list[ProbeTarget]) -> None:
         task.status = TaskStatus.RUNNING
         task.started_at = _utcnow()
+        children = [
+            asyncio.create_task(self._run_one(task, index, target))
+            for index, target in enumerate(targets)
+        ]
         try:
-            await asyncio.gather(
-                *(self._run_one(task, index, target) for index, target in enumerate(targets))
-            )
+            await asyncio.gather(*children)
             task.status = TaskStatus.SUCCEEDED
         except asyncio.CancelledError:
+            # gather 在首个取消回调时即返回，兄弟探测可能仍在跑：
+            # 先确保全部子任务取消并收尾，再填终态，避免终态后被写结果。
+            await self._cancel_children(children)
             self._fill_missing(task, targets, TargetStatus.CANCELLED, "任务已取消")
             task.status = TaskStatus.CANCELLED
             raise  # 保留取消语义，由 cancel()/shutdown() 侧收敛
         except Exception as exc:  # 防御性兜底：probe_tcp 已分类预期异常，这里只防内部错误
+            await self._cancel_children(children)
             logger.exception("task_failed", extra={"task_id": task.id})
             task.error = f"{type(exc).__name__}: {exc}"
             self._fill_missing(task, targets, TargetStatus.ERROR, "任务内部错误")
@@ -181,6 +195,13 @@ class ProbeService:
                 event.set()
             self._running.pop(task.id, None)
             self._targets.pop(task.id, None)
+
+    @staticmethod
+    async def _cancel_children(children: list[asyncio.Task[None]]) -> None:
+        for child in children:
+            child.cancel()
+        if children:
+            await asyncio.gather(*children, return_exceptions=True)
 
     async def _run_one(self, task: Task, index: int, target: ProbeTarget) -> None:
         timeout_ms = target.timeout_ms or self._settings.probe_default_timeout_ms

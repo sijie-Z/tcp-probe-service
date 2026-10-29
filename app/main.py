@@ -12,4 +12,5 @@ if __name__ == "__main__":
     import uvicorn
 
     settings = Settings.from_env()
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port)
+    # 直接传 app 对象：传导入字符串会以 app.main 再导入一次，创建第二个应用实例
+    uvicorn.run(app, host=settings.host, port=settings.port)

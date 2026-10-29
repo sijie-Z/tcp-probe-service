@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -56,6 +57,8 @@ def _read_float(
         value = float(raw)
     except ValueError:
         raise ConfigError(f"环境变量 {name}={raw!r} 不是合法数字") from None
+    if not math.isfinite(value):
+        raise ConfigError(f"环境变量 {name}={raw!r} 必须是有限数字（不允许 nan/inf）")
     if minimum is not None and value < minimum:
         raise ConfigError(f"环境变量 {name}={value} 不能小于 {minimum}")
     return value
@@ -109,6 +112,16 @@ class Settings:
             raise ConfigError("PROBE_DEFAULT_TIMEOUT_MS 不能大于 PROBE_MAX_TIMEOUT_MS")
         if self.rate_limit_enabled and self.rate_limit_rps <= 0:
             raise ConfigError("限流开启时 RATE_LIMIT_RPS 必须大于 0")
+        if not math.isfinite(self.rate_limit_rps) or self.rate_limit_rps < 0:
+            raise ConfigError("RATE_LIMIT_RPS 必须是有限非负数（不允许 nan/inf）")
+        # 过小的 rps 会让 retry_after 溢出为 inf，相当于永久封禁，直接拒绝
+        if self.rate_limit_enabled and self.rate_limit_rps < 1e-6:
+            raise ConfigError("限流开启时 RATE_LIMIT_RPS 不得小于 1e-6")
+        if (
+            not math.isfinite(self.rate_limit_idle_ttl_seconds)
+            or self.rate_limit_idle_ttl_seconds <= 0
+        ):
+            raise ConfigError("RATE_LIMIT_IDLE_TTL_SECONDS 必须是有限正数（不允许 nan/inf）")
 
     @classmethod
     def from_env(cls) -> Settings:

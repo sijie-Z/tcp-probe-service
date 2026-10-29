@@ -22,7 +22,7 @@ test:
 
 # 本地前台启动服务（Ctrl+C 退出）
 run:
-	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 
 # 构建 Docker 镜像（镜像名与 docker-compose.yml 中的 image 保持一致）
 docker-build:

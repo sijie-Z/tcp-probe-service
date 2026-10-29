@@ -67,6 +67,14 @@ def test_running_tasks_never_expire() -> None:
     assert store.get("run") is not None
 
 
+def test_terminal_without_finished_at_treated_as_just_finished() -> None:
+    """终态但缺 finished_at（外部直接 add）按“刚结束”处理，不立即过期。"""
+    now = [1000.0]
+    store = TaskStore(_settings(task_ttl_seconds=10), clock=lambda: now[0])
+    store.add(_task("t", status=TaskStatus.SUCCEEDED, finished_at=None))
+    assert store.get("t") is not None
+
+
 def test_capacity_evicts_oldest_finished_only() -> None:
     store = TaskStore(_settings(task_max_retained=2))
     base = datetime.now(timezone.utc)
