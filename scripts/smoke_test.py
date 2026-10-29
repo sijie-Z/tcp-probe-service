@@ -171,12 +171,16 @@ def api_request(
 
 
 def _bind_address_for(target_host: str) -> str:
-    """open 目标的监听地址：目标是回环地址时只绑回环，否则绑所有网卡。
+    """open 目标的监听地址：回环目标只绑回环（IPv6 用 ::1），否则绑所有网卡。
 
     服务在 Docker 容器里时，它看到的 127.0.0.1 是容器自己，必须改成
     host.docker.internal 之类的宿主机地址，此时监听端口也要绑到所有网卡才可达。
     """
-    return "127.0.0.1" if target_host in ("127.0.0.1", "localhost", "::1") else "0.0.0.0"
+    if target_host in ("127.0.0.1", "localhost"):
+        return "127.0.0.1"
+    if target_host == "::1":
+        return "::1"
+    return "0.0.0.0"
 
 
 def _listen_local(bind_host: str) -> socket.socket:
@@ -187,7 +191,8 @@ def _listen_local(bind_host: str) -> socket.socket:
     回 SYN-ACK，客户端 connect() 随即成功返回。accept() 只决定应用何时从队列
     取走连接，与"该端口是否可连接"无关。端口传 0 表示交给内核分配空闲端口。
     """
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
     try:
         listener.bind((bind_host, 0))
         listener.listen(8)

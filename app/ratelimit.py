@@ -7,7 +7,7 @@
 - 内存治理：key 可能来自不可信输入（如客户端 IP），字典不能无限增长。每 1024 次
   check 或桶数量超过 4096 时触发惰性清扫（两次清扫至少间隔 1 秒，避免桶数超阈值后
   每个请求都做全表扫描），回收 ``now - last_seen > idle_ttl_seconds`` 的空闲桶；
-  桶数另有 10 万硬上限，超出时按 last_seen 淘汰最久未活跃的 key。
+  桶数另有 10 万硬上限，超出时按字典顺序近似随机淘汰（O(n) 截断、无排序）保证内存有界。
 
 并发前提：实例仅支持在单个事件循环（单线程）内由 HTTP 中间件同步调用；所有状态读写
 都发生在同一线程，因此不引入锁。多线程或多进程共享同一实例不在支持范围内。
@@ -172,9 +172,10 @@ class RateLimiter:
         for key in stale:
             del self._buckets[key]
         if len(self._buckets) > _MAX_TRACKED_KEYS:
-            # 硬上限：攻击者可以无限轮换来源 IP，空闲清扫防不住全部增长，
-            # 超限时按最近活跃时间淘汰最旧的部分，保证内存有界
-            ordered = sorted(self._buckets.items(), key=lambda item: item[1].last_seen)
-            for key, _entry in ordered[: len(self._buckets) - _MAX_TRACKED_KEYS]:
+            # 硬上限：攻击者可无限轮换来源 IP，空闲清扫防不住全部增长。
+            # 单次 O(n) 迭代按字典顺序截断（不做排序），只保证内存有界；
+            # 精确 LRU 需要有序结构，代价更大，不在作业范围内。
+            excess = len(self._buckets) - _MAX_TRACKED_KEYS
+            for key in list(self._buckets.keys())[:excess]:
                 del self._buckets[key]
         return len(stale)

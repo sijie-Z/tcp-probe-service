@@ -167,7 +167,7 @@ done
 
 ## 限流与背压
 
-- **限流**：按来源 IP 的令牌桶，默认稳态 5 rps、突发 10（`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST`）。只作用于 `/api/*`；超限返回 429 + `Retry-After`。空闲桶在 `RATE_LIMIT_IDLE_TTL_SECONDS`（默认 600s）后惰性回收，防止内存被大量伪造来源撑爆。
+- **限流**：按来源 IP 的令牌桶，默认稳态 5 rps、突发 10（`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST`）。只作用于 `/api/*`；超限返回 429 + `Retry-After`。空闲桶在 `RATE_LIMIT_IDLE_TTL_SECONDS`（默认 600s）后惰性回收，桶数另有 10 万硬上限（超出按字典顺序近似随机淘汰，O(n) 截断、无排序，保证内存有界）。开启限流时 rps 下限为 1/3600，保证 `Retry-After` 反映真实等待时间。
 - **客户端 IP 取 TCP 对端地址**，不信任 `X-Forwarded-For`。部署在反向代理之后时，限流会退化为按代理 IP 计算，应改由代理层做真实来源限流（见 DESIGN.md「安全考量」）。
 - **背压**：活动任务数达到 `TASK_MAX_ACTIVE`（默认 100）时直接 503 + `Retry-After`，而不是无限排队；单任务目标数受 `TASK_MAX_TARGETS`（默认 200）限制。
 - **并发上限**：所有任务共享 `PROBE_MAX_CONCURRENCY`（默认 100）个在途连接许可，防止文件描述符耗尽。
@@ -188,7 +188,7 @@ done
 | `TASK_TTL_SECONDS` | `3600` | 终态任务内存保留时长 |
 | `TASK_MAX_RETAINED` | `1000` | 内存中最多任务条数 |
 | `RATE_LIMIT_ENABLED` | `true` | 是否开启限流 |
-| `RATE_LIMIT_RPS` | `5` | 每客户端每秒令牌数 |
+| `RATE_LIMIT_RPS` | `5` | 每客户端每秒令牌数（开启限流时不低于 1/3600） |
 | `RATE_LIMIT_BURST` | `10` | 每客户端桶容量（突发上限） |
 | `RATE_LIMIT_IDLE_TTL_SECONDS` | `600` | 空闲令牌桶回收时间 |
 

@@ -32,7 +32,7 @@ import asyncio
 import socket
 import time
 
-from app.host import HOSTNAME_RE, ip_literal
+from app.host import ip_literal, validate_host
 from app.models import TargetResult, TargetStatus
 
 _MAX_ADDRINFOS = 8
@@ -47,15 +47,18 @@ _AddrInfo = tuple[int, int, int, str, _SockAddr]
 def _invalid_reason(host: object, port: object) -> str | None:
     """校验 host/port；非法时返回带机器可读前缀的原因，合法时返回 None。
 
-    规则与 ``app.models._validate_host`` / ``ProbeTarget`` 一致：host 先 strip，
-    接受 IP 字面量（含 [IPv6] 写法）或主机名正则，port 必须在 1-65535。
+    规则与 ``app.host.validate_host`` / ``ProbeTarget`` 一致：host 先 strip，
+    接受 IP 字面量（含 [IPv6] 写法）或主机名正则，纯数字/点分简写必须按严格 IP 解析成功；
+    port 必须在 1-65535。
     """
     if not isinstance(host, str):
         return "invalid_host: host 必须是字符串"
     candidate = host.strip()
     if not candidate:
         return "invalid_host: host 不能为空"
-    if ip_literal(candidate) is None and not HOSTNAME_RE.match(candidate):
+    try:
+        validate_host(candidate)
+    except ValueError:
         return f"invalid_host: {candidate!r} 不是合法的 IP 或主机名"
     if isinstance(port, bool) or not isinstance(port, int):
         return "invalid_port: port 必须是整数"

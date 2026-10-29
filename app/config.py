@@ -114,9 +114,10 @@ class Settings:
             raise ConfigError("限流开启时 RATE_LIMIT_RPS 必须大于 0")
         if not math.isfinite(self.rate_limit_rps) or self.rate_limit_rps < 0:
             raise ConfigError("RATE_LIMIT_RPS 必须是有限非负数（不允许 nan/inf）")
-        # 过小的 rps 会让 retry_after 溢出为 inf，相当于永久封禁，直接拒绝
-        if self.rate_limit_enabled and self.rate_limit_rps < 1e-6:
-            raise ConfigError("限流开启时 RATE_LIMIT_RPS 不得小于 1e-6")
+        # 过小的 rps 会让 retry_after 超出合理等待窗口（甚至溢出为 inf），直接拒绝；
+        # 下限取 1/3600：保证限流响应中的 Retry-After 反映真实等待时间且不超过 3600 秒
+        if self.rate_limit_enabled and self.rate_limit_rps < 1.0 / 3600.0:
+            raise ConfigError("限流开启时 RATE_LIMIT_RPS 不得小于 1/3600（约 0.000278）")
         if (
             not math.isfinite(self.rate_limit_idle_ttl_seconds)
             or self.rate_limit_idle_ttl_seconds <= 0

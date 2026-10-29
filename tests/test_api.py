@@ -263,3 +263,11 @@ def test_unhandled_error_returns_envelope_with_request_id() -> None:
     assert body["error"]["code"] == "INTERNAL_ERROR"
     assert body["error"]["request_id"] == "trace-500"
     assert response.headers["X-Request-ID"] == "trace-500"
+
+
+def test_validation_rejects_ipv4_shorthand(client: TestClient) -> None:
+    """IP 简写/前导零串（会被系统解析器当成 IP）必须按非法输入拒绝，不能回退成主机名走 DNS。"""
+    for host in ("2130706433", "127.1", "010.0.0.1", "999.999.999.999"):
+        response = client.post("/api/v1/tasks", json={"targets": [{"host": host, "port": 80}]})
+        assert response.status_code == 422, host
+        assert response.json()["error"]["code"] == "VALIDATION_FAILED"

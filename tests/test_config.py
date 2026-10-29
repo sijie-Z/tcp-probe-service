@@ -33,9 +33,13 @@ def test_direct_settings_rejects_non_finite_rps() -> None:
 
 
 def test_direct_settings_rejects_too_small_rps_when_enabled() -> None:
-    # 极小 rps 会让 retry_after 溢出为 inf，相当于永久封禁，应当拒绝
+    # 极小 rps 会让 Retry-After 超出合理等待窗口（甚至溢出为 inf），应当拒绝；
+    # 下限 1/3600（约 0.000278）保证限流头反映真实等待时间
     with pytest.raises(ConfigError):
         Settings(rate_limit_rps=1e-9)
+    with pytest.raises(ConfigError):
+        Settings(rate_limit_rps=1e-4)
+    assert Settings(rate_limit_rps=3e-4).rate_limit_rps == 3e-4
 
 
 def test_zero_rps_allowed_only_when_disabled() -> None:

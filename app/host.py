@@ -14,6 +14,11 @@ HOSTNAME_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9_-]{1,63}(?<!-))*\.?$"
 )
 
+# 纯数字/点分串：必须按严格 IP 解析成功，失败即整体的非法输入。
+# 010.0.0.1 / 127.1 / 2130706433 会被系统解析器当作 IP 简写（且各平台语义不一致），
+# 不能回退成主机名交给 DNS——这也是未来目标白名单的关键防绕过点。
+_NUMERIC_ONLY = re.compile(r"^[0-9.]+$")
+
 
 def strip_brackets(candidate: str) -> str:
     """去掉 IPv6 字面量的方括号写法：``[::1]`` → ``::1``。"""
@@ -35,6 +40,11 @@ def ip_literal(candidate: str) -> str | None:
 def validate_host(value: str) -> str:
     """校验并返回主机名（strip 之后）。非法时抛 ValueError。"""
     candidate = value.strip()
-    if ip_literal(candidate) is not None or HOSTNAME_RE.match(candidate):
+    if ip_literal(candidate) is not None:
+        return candidate
+    if _NUMERIC_ONLY.match(candidate):
+        # 纯数字/点分串按严格 IP 解析失败即拒绝，不回退成主机名（见 _NUMERIC_ONLY 注释）
+        raise ValueError("host 不是合法的主机名或 IP 地址")
+    if HOSTNAME_RE.match(candidate):
         return candidate
     raise ValueError("host 不是合法的主机名或 IP 地址")
