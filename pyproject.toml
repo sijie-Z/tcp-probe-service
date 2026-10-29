@@ -1,0 +1,27 @@
+[project]
+name = "tcp-probe-service"
+version = "1.0.0"
+description = "简易 TCP 连接探测服务：HTTP 接口接收批量探测任务，asyncio 自研 TCP 连通性探测，令牌桶限流"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.29,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
