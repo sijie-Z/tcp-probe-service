@@ -299,3 +299,19 @@ def test_openapi_contract_covers_documented_endpoints(client: TestClient) -> Non
     task_props = schema["components"]["schemas"]["Task"]["properties"]
     for field in ("id", "status", "total", "completed", "results", "created_at"):
         assert field in task_props
+
+
+def test_metrics_endpoint_reports_counters(client: TestClient, open_port: int) -> None:
+    client.post(
+        "/api/v1/tasks?wait=true&wait_timeout_ms=5000",
+        json={"targets": [{"host": "127.0.0.1", "port": open_port}]},
+    )
+
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+
+    text = response.text
+    assert "tcp_probe_tasks_submitted_total" in text
+    assert 'tcp_probe_tasks_finished_total{status="succeeded"}' in text
+    assert 'tcp_probe_targets_total{status="open"}' in text

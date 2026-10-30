@@ -1,0 +1,29 @@
+name: Docker
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t tcp-probe-service:ci .
+
+      - name: Run container and smoke test
+        run: |
+          docker run -d --name probe-ci --add-host host.docker.internal:host-gateway \
+            -p 8000:8000 tcp-probe-service:ci
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/healthz >/dev/null && break
+            sleep 1
+          done
+          python3 scripts/smoke_test.py --base-url http://127.0.0.1:8000 --target-host host.docker.internal
+          STATUS=$?
+          docker rm -f probe-ci || true
+          exit $STATUS

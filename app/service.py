@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.config import Settings
+from app.metrics import Metrics
 from app.models import (
     CreateTaskRequest,
     ProbeTarget,
@@ -56,9 +57,13 @@ def _utcnow() -> datetime:
 
 
 class ProbeService:
-    def __init__(self, settings: Settings, store: TaskStore) -> None:
+    def __init__(
+        self, settings: Settings, store: TaskStore, metrics: Metrics | None = None
+    ) -> None:
         self._settings = settings
         self._store = store
+        self._metrics = metrics
+        self._recorded: set[str] = set()
         self._semaphore = asyncio.Semaphore(settings.probe_max_concurrency)
         self._running: dict[str, asyncio.Task[None]] = {}
         self._done: dict[str, asyncio.Event] = {}
@@ -68,6 +73,8 @@ class ProbeService:
         """校验并创建任务，立即返回；执行在后台协程中进行。"""
         targets = request.targets
         if len(targets) > self._settings.task_max_targets:
+            if self._metrics is not None:
+                self._metrics.inc("tcp_probe_tasks_rejected_total", reason="invalid")
             raise ProbeRequestError(
                 "TARGETS_TOO_MANY",
                 f"单任务最多 {self._settings.task_max_targets} 个目标，收到 {len(targets)} 个",
@@ -77,12 +84,16 @@ class ProbeService:
                 target.timeout_ms is not None
                 and target.timeout_ms > self._settings.probe_max_timeout_ms
             ):
+                if self._metrics is not None:
+                    self._metrics.inc("tcp_probe_tasks_rejected_total", reason="invalid")
                 raise ProbeRequestError(
                     "TIMEOUT_TOO_LARGE",
                     f"timeout_ms 不能超过 {self._settings.probe_max_timeout_ms}"
                     f"（host={target.host}:{target.port}）",
                 )
         if self._store.count_active() >= self._settings.task_max_active:
+            if self._metrics is not None:
+                self._metrics.inc("tcp_probe_tasks_rejected_total", reason="capacity")
             raise TaskCapacityError(
                 f"活动任务数已达上限 {self._settings.task_max_active}，请稍后重试"
             )
@@ -94,6 +105,8 @@ class ProbeService:
             results=[None] * len(targets),
         )
         self._store.add(task)
+        if self._metrics is not None:
+            self._metrics.inc("tcp_probe_tasks_submitted_total")
         self._done[task.id] = asyncio.Event()
         self._targets[task.id] = targets
         self._running[task.id] = asyncio.create_task(
@@ -132,6 +145,7 @@ class ProbeService:
                 if current is not None and getattr(current, "cancelling", lambda: 0)() > 0:
                     raise
         self._finalize_cancelled(task)
+        self._record_terminal(task)
         return task
 
     async def shutdown(self) -> None:
@@ -164,6 +178,17 @@ class ProbeService:
         if event is not None:
             event.set()
         self._running.pop(task.id, None)
+        self._record_terminal(task)
+
+    def _record_terminal(self, task: Task) -> None:
+        """记录任务终态与目标结果指标（同一任务只记一次）。"""
+        if self._metrics is None or task.id in self._recorded or not task.is_terminal:
+            return
+        self._recorded.add(task.id)
+        self._metrics.inc("tcp_probe_tasks_finished_total", status=task.status.value)
+        for result in task.results:
+            if result is not None:
+                self._metrics.inc("tcp_probe_targets_total", status=result.status.value)
 
     async def _run(self, task: Task, targets: list[ProbeTarget]) -> None:
         task.status = TaskStatus.RUNNING
@@ -195,6 +220,7 @@ class ProbeService:
                 event.set()
             self._running.pop(task.id, None)
             self._targets.pop(task.id, None)
+            self._record_terminal(task)
 
     @staticmethod
     async def _cancel_children(children: list[asyncio.Task[None]]) -> None:

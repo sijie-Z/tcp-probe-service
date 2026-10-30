@@ -20,13 +20,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.config import Settings
 from app.log import configure_logging, request_id_var
+from app.metrics import Metrics
 from app.models import (
     CreateTaskRequest,
     ErrorBody,
@@ -124,9 +125,10 @@ class RequestContextMiddleware:
 class RateLimitMiddleware:
     """按来源 IP 的令牌桶限流，只作用于 /api/*；超限返回 429 与 Retry-After。"""
 
-    def __init__(self, app, limiter: RateLimiter) -> None:  # noqa: ANN001 - ASGI app
+    def __init__(self, app, limiter: RateLimiter, metrics: Metrics | None = None) -> None:  # noqa: ANN001 - ASGI app
         self.app = app
         self.limiter = limiter
+        self.metrics = metrics
 
     async def __call__(self, scope, receive, send):  # noqa: ANN001 - ASGI 协议
         if scope["type"] != "http" or not scope.get("path", "").startswith("/api/"):
@@ -137,6 +139,8 @@ class RateLimitMiddleware:
         key = client[0] if client else "unknown"
         allowed, retry_after = self.limiter.check(key)
         if not allowed:
+            if self.metrics is not None:
+                self.metrics.inc("tcp_probe_rate_limited_total")
             # 上限 3600 秒：防止极小 rps 配置把 math.ceil 推到溢出
             retry_seconds = max(1, math.ceil(min(retry_after, 3600.0)))
             request_id = str(scope.get("state", {}).get("request_id") or "") or uuid.uuid4().hex
@@ -159,9 +163,10 @@ class BodySizeLimitMiddleware:
     无 Content-Length 的分块请求由 uvicorn 的连接层兜底。
     """
 
-    def __init__(self, app, max_bytes: int) -> None:  # noqa: ANN001 - ASGI app
+    def __init__(self, app, max_bytes: int, metrics: Metrics | None = None) -> None:  # noqa: ANN001 - ASGI app
         self.app = app
         self.max_bytes = max_bytes
+        self.metrics = metrics
 
     async def __call__(self, scope, receive, send):  # noqa: ANN001 - ASGI 协议
         if scope["type"] != "http":
@@ -175,6 +180,8 @@ class BodySizeLimitMiddleware:
             except ValueError:
                 length = None
             if length is not None and length > self.max_bytes:
+                if self.metrics is not None:
+                    self.metrics.inc("tcp_probe_body_rejected_total")
                 request_id = str(scope.get("state", {}).get("request_id") or "") or uuid.uuid4().hex
                 response = _error_response(
                     413,
@@ -250,7 +257,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
 
 def _register_routes(
-    app: FastAPI, service: ProbeService, store: TaskStore, started_at: float
+    app: FastAPI, service: ProbeService, store: TaskStore, started_at: float, metrics: Metrics
 ) -> None:
     @app.get("/", tags=["运维"], summary="服务信息")
     async def index() -> dict:
@@ -264,12 +271,19 @@ def _register_routes(
                 "GET /api/v1/tasks/{task_id}",
                 "DELETE /api/v1/tasks/{task_id}",
                 "GET /healthz",
+                "GET /metrics",
             ],
         }
 
     @app.get("/healthz", tags=["运维"], summary="存活探针（不参与限流）")
     async def healthz() -> dict:
         return {"status": "ok", "uptime_seconds": round(time.monotonic() - started_at, 1)}
+
+    @app.get("/metrics", tags=["运维"], summary="Prometheus 文本指标（不参与限流）")
+    async def metrics_endpoint() -> PlainTextResponse:
+        return PlainTextResponse(
+            metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
 
     @app.post(
         "/api/v1/tasks",
@@ -333,8 +347,9 @@ def _register_routes(
 def create_app(settings: Settings | None = None) -> FastAPI:
     """应用工厂：测试可注入自定义 Settings，生产从环境变量读取。"""
     settings = settings or Settings.from_env()
+    metrics = Metrics()
     store = TaskStore(settings)
-    service = ProbeService(settings, store)
+    service = ProbeService(settings, store, metrics)
     limiter = (
         RateLimiter(
             settings.rate_limit_rps,
@@ -368,10 +383,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.service = service
 
     if limiter is not None:
-        app.add_middleware(RateLimitMiddleware, limiter=limiter)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
+        app.add_middleware(RateLimitMiddleware, limiter=limiter, metrics=metrics)
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes, metrics=metrics)
     app.add_middleware(RequestContextMiddleware)
 
     _register_exception_handlers(app)
-    _register_routes(app, service, store, started_at)
+    _register_routes(app, service, store, started_at, metrics)
     return app

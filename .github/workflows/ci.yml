@@ -37,6 +37,9 @@ jobs:
           path: coverage.xml
           if-no-files-found: ignore
 
+      - name: Validate compose file
+        run: docker compose config -q
+
       - name: End-to-end smoke (start service, run smoke, stop)
         run: |
           python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log &

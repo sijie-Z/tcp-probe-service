@@ -18,6 +18,18 @@ HTTP 接口接收**批量 TCP 连通性探测任务**，后台使用 **asyncio +
 | 不要使用第三方封装好的探测组件 | 探测引擎完全自研：`asyncio.open_connection` 不做，直接 `loop.sock_connect` + 标准库 socket，见 [app/prober.py](app/prober.py) |
 | 交付 Git 仓库 + README，拉下来能启动和验证 | 本仓库：`docker compose up` 或本地 venv 两种方式；`scripts/smoke_test.py` 一键端到端验证 |
 
+## 架构一览
+
+```mermaid
+flowchart LR
+    C[HTTP 客户端] --> MW[请求上下文 / 体积限制 / 限流]
+    MW --> API[FastAPI 路由]
+    API --> SVC[任务编排 asyncio]
+    SVC --> PROBE[TCP 探测引擎]
+    SVC --> STORE[(任务存储 TTL)]
+    PROBE --> RES[结果按提交顺序回填]
+```
+
 ## 快速开始
 
 ### 方式一：Docker（推荐，免装依赖）
@@ -127,6 +139,7 @@ done
 | GET | `/api/v1/tasks/{task_id}` | 任务详情与结果；结果与提交顺序一一对应，未完成的槽位为 `null` |
 | DELETE | `/api/v1/tasks/{task_id}` | 取消未结束的任务（未完成目标以 `cancelled` 补齐，已出结果保留）；已结束返回 409 |
 | GET | `/healthz` | 存活探针，不参与限流 |
+| GET | `/metrics` | Prometheus 文本指标（手写零依赖，不参与限流） |
 
 **请求体**（`POST /api/v1/tasks`）：
 
@@ -207,6 +220,7 @@ done
 - **队列与资源治理**：全局信号量限流在途连接；任务结果按提交顺序原地填充；取消通过 `CancelledError` 传播，未完成槽位补 `cancelled`；关停时取消全部在途任务。
 - **内存治理**：任务 TTL 惰性清理 + 条数上限淘汰最旧终态任务 + 活动任务背压，三层限制保证内存有界。
 - **可观测性**：JSON 结构化日志（访问日志、请求 id 贯穿）、`X-Request-ID` 响应头、`/healthz`。
+- **指标**：`GET /metrics` 输出 Prometheus 文本格式计数器（任务提交/拒绝、任务终态、目标结果分布、限流/体积拦截），重启归零。
 - **请求体上限**：`MAX_BODY_BYTES`（默认 1 MiB）在中间件层按 Content-Length 拦截，超过直接 413 统一信封，避免超大 JSON 占用内存。
 
 完整设计取舍与边界条件见 [docs/DESIGN.md](docs/DESIGN.md)；面试问答见 [docs/INTERVIEW_QA.md](docs/INTERVIEW_QA.md)。
