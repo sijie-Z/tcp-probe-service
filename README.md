@@ -1,5 +1,7 @@
 # 简易 TCP 连接探测服务
 
+[![CI](https://github.com/sijie-Z/tcp-probe-service/actions/workflows/ci.yml/badge.svg)](https://github.com/sijie-Z/tcp-probe-service/actions/workflows/ci.yml)
+
 HTTP 接口接收**批量 TCP 连通性探测任务**，后台使用 **asyncio + 标准库 socket 自研探测引擎**（未使用任何第三方探测组件）执行探测，按**来源 IP 的令牌桶限流**，结果按提交顺序返回。
 
 > 北京悦游信息技术有限公司 招聘作业 —— 完整设计说明见 [docs/DESIGN.md](docs/DESIGN.md)，实现细节问答见 [docs/INTERVIEW_QA.md](docs/INTERVIEW_QA.md)。
@@ -53,7 +55,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 ```
 
-脚本自动验证：健康检查与 `X-Request-ID` 透传 → 批量探测（open / closed / dns_error 三种状态与顺序）→ 异步提交 + 轮询 → 限流（429 与 `Retry-After`）。全部通过退出码为 0。
+脚本自动验证：健康检查与 `X-Request-ID` 透传 → 批量探测（open / closed / dns_error 三种状态与顺序）→ 异步提交 + 轮询 → 错误契约（404/405/422 信封、details、request_id、非法请求 id 替换）→ 限流（429 与 `Retry-After`）。全部通过退出码为 0。
 
 > Docker 方式启动时注意：容器内的 `127.0.0.1` 是容器自身，而冒烟脚本的 open/closed 探测目标建在宿主机上。
 > 这时需要把目标主机指向宿主机（compose 已配置 `extra_hosts`）：

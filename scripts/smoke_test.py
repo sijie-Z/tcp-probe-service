@@ -6,7 +6,8 @@
   2. GET /healthz 健康检查，以及 X-Request-ID 的透传 / 缺省时自动生成
   3. 同步批量探测（wait=true）：open / closed / dns_error 三种结果与结果顺序
   4. 异步任务：POST 返回 202，轮询任务详情直到终态
-  5. 限流：连续请求应触发 429 且带 Retry-After（未触发时跳过，不算失败）
+  5. 错误契约：404/405/422 统一信封、字段级 details、request_id、非法请求 id 替换
+  6. 限流：连续请求应触发 429 且带 Retry-After（未触发时跳过，不算失败）
 
 用法：
     python scripts/smoke_test.py [--base-url http://127.0.0.1:8000]
@@ -263,6 +264,65 @@ def check_request_id(base_url: str, target_host: str, reporter: Reporter) -> Non
     reporter.ok(f"X-Request-ID：自定义值 {custom} 原样透传，缺省时服务自动生成（{generated}）")
 
 
+def check_error_contract(base_url: str, target_host: str, reporter: Reporter) -> None:
+    """错误契约：404 / 405 / 422 统一错误信封、details、request_id，以及非法请求 id 替换。"""
+
+    def code_is(body: Any, expected: str) -> bool:
+        if not isinstance(body, dict):
+            return False
+        error = body.get("error")
+        return isinstance(error, dict) and error.get("code") == expected
+
+    problems: list[str] = []
+
+    missing = api_request("GET", f"{base_url}/api/v1/tasks/does-not-exist", timeout=5.0)
+    if missing.status != 404 or not code_is(missing.body, "TASK_NOT_FOUND"):
+        problems.append(f"未知任务应为 404 TASK_NOT_FOUND，实际 HTTP {missing.status}")
+
+    unknown_path = api_request("GET", f"{base_url}/definitely-not-a-route", timeout=5.0)
+    if unknown_path.status != 404 or not code_is(unknown_path.body, "NOT_FOUND"):
+        problems.append(f"未知路径应为 404 NOT_FOUND，实际 HTTP {unknown_path.status}")
+
+    bad_method = api_request(
+        "PUT", f"{base_url}/api/v1/tasks", payload={"targets": []}, timeout=5.0
+    )
+    if bad_method.status != 405 or not code_is(bad_method.body, "METHOD_NOT_ALLOWED"):
+        problems.append(f"PUT 应为 405 METHOD_NOT_ALLOWED，实际 HTTP {bad_method.status}")
+
+    invalid = api_request(
+        "POST",
+        f"{base_url}/api/v1/tasks",
+        payload={"targets": [{"host": "bad host!", "port": 80}]},
+        timeout=5.0,
+    )
+    if invalid.status != 422 or not code_is(invalid.body, "VALIDATION_FAILED"):
+        problems.append(f"非法 host 应为 422 VALIDATION_FAILED，实际 HTTP {invalid.status}")
+    else:
+        error = invalid.body.get("error", {}) if isinstance(invalid.body, dict) else {}
+        if not isinstance(error.get("details"), list) or not error.get("details"):
+            problems.append("422 响应缺少字段级 details")
+        if not error.get("request_id"):
+            problems.append("422 响应缺少 request_id")
+
+    sanitized = api_request(
+        "GET",
+        f"{base_url}/healthz",
+        headers={"X-Request-ID": "bad id with spaces"},
+        timeout=5.0,
+    )
+    echoed = sanitized.headers.get("X-Request-ID") if sanitized.headers is not None else None
+    if not echoed or echoed == "bad id with spaces":
+        problems.append(f"非法 X-Request-ID 应被替换，实际 {echoed!r}")
+
+    if problems:
+        reporter.fail("错误契约（404/405/422 信封与请求 id）：" + "；".join(problems))
+        return
+    reporter.ok(
+        "错误契约：404/405/422 均为统一错误信封，details/request_id 齐全，非法请求 id 已替换"
+    )
+
+
+
 def check_batch_sync(base_url: str, target_host: str, reporter: Reporter) -> None:
     """同步批量探测：一次提交 open / closed / dns_error 三类目标，验证全部结果。"""
     listener = _listen_local(_bind_address_for(target_host))
@@ -440,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
     if not check_reachable(base_url, reporter):
         return 1
 
-    steps = (check_healthz, check_request_id, check_batch_sync, check_async, check_rate_limit)
+    steps = (check_healthz, check_request_id, check_batch_sync, check_async,
+             check_error_contract, check_rate_limit)
     for step in steps:
         try:
             step(base_url, target_host, reporter)

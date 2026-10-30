@@ -150,6 +150,7 @@ tokens(t) = min(capacity, tokens(t0) + (t - t0) * rps)
 > 代理软件）会**延迟**送达 RST（实测某安全软件延迟约 2 秒），因此集成测试默认预算 3000ms、
 > 冒烟脚本 5000ms（均大于延迟窗口），断言仍为严格的 `closed`；若环境彻底静默丢包，返回的
 > `timeout` 同样是诚实结果——这正是 `timeout` 语义存在的原因。
+- **CI**：GitHub Actions 每次 push/PR 自动执行 lint + 全部测试 + 启动服务跑端到端冒烟（`.github/workflows/ci.yml`）。
 
 ## 11. 安全考量
 
