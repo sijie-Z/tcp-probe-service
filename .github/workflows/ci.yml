@@ -26,8 +26,16 @@ jobs:
       - name: Lint (ruff)
         run: ruff check app tests scripts
 
-      - name: Unit & API tests (pytest)
-        run: python -m pytest
+      - name: Unit & API tests (pytest + coverage)
+        run: python -m pytest --cov=app --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
 
       - name: End-to-end smoke (start service, run smoke, stop)
         run: |

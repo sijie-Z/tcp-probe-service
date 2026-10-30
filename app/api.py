@@ -152,6 +152,41 @@ class RateLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+class BodySizeLimitMiddleware:
+    """请求体大小限制：Content-Length 超过上限直接 413 统一信封，避免超大 JSON 占用内存。
+
+    限制：只依据 Content-Length 头（常规 JSON 客户端都会发送）；
+    无 Content-Length 的分块请求由 uvicorn 的连接层兜底。
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:  # noqa: ANN001 - ASGI app
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001 - ASGI 协议
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        raw = headers.get("content-length")
+        if raw is not None:
+            try:
+                length = int(raw)
+            except ValueError:
+                length = None
+            if length is not None and length > self.max_bytes:
+                request_id = str(scope.get("state", {}).get("request_id") or "") or uuid.uuid4().hex
+                response = _error_response(
+                    413,
+                    "PAYLOAD_TOO_LARGE",
+                    f"请求体超过大小上限（{self.max_bytes} 字节）",
+                    request_id,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def _register_exception_handlers(app: FastAPI) -> None:
     def request_id() -> str:
         return request_id_var.get()
@@ -334,6 +369,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if limiter is not None:
         app.add_middleware(RateLimitMiddleware, limiter=limiter)
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
     app.add_middleware(RequestContextMiddleware)
 
     _register_exception_handlers(app)

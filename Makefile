@@ -6,7 +6,7 @@ PYTHON     ?= python
 IMAGE      ?= tcp-probe-service:latest
 SMOKE_ARGS ?=
 
-.PHONY: install dev test run docker-build docker-up docker-down smoke
+.PHONY: install dev test run docker-build docker-up docker-down smoke load
 
 # 安装运行时依赖
 install:
@@ -41,3 +41,7 @@ docker-down:
 #   make smoke SMOKE_ARGS="--target-host host.docker.internal"
 smoke:
 	$(PYTHON) -m scripts.smoke_test $(SMOKE_ARGS)
+
+# 轻量压测（建议先以 RATE_LIMIT_ENABLED=false 启动服务）
+load:
+	$(PYTHON) scripts/load_test.py

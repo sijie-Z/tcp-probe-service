@@ -196,6 +196,7 @@ done
 | `RATE_LIMIT_RPS` | `5` | 每客户端每秒令牌数（开启限流时不低于 1/3600） |
 | `RATE_LIMIT_BURST` | `10` | 每客户端桶容量（突发上限） |
 | `RATE_LIMIT_IDLE_TTL_SECONDS` | `600` | 空闲令牌桶回收时间 |
+| `MAX_BODY_BYTES` | `1048576` | 请求体大小上限（字节），超过返回 413 `PAYLOAD_TOO_LARGE` |
 
 非法配置（如 `RATE_LIMIT_RPS=abc`、`PROBE_DEFAULT_TIMEOUT_MS > PROBE_MAX_TIMEOUT_MS`）在启动时立即报错退出。
 
@@ -206,6 +207,7 @@ done
 - **队列与资源治理**：全局信号量限流在途连接；任务结果按提交顺序原地填充；取消通过 `CancelledError` 传播，未完成槽位补 `cancelled`；关停时取消全部在途任务。
 - **内存治理**：任务 TTL 惰性清理 + 条数上限淘汰最旧终态任务 + 活动任务背压，三层限制保证内存有界。
 - **可观测性**：JSON 结构化日志（访问日志、请求 id 贯穿）、`X-Request-ID` 响应头、`/healthz`。
+- **请求体上限**：`MAX_BODY_BYTES`（默认 1 MiB）在中间件层按 Content-Length 拦截，超过直接 413 统一信封，避免超大 JSON 占用内存。
 
 完整设计取舍与边界条件见 [docs/DESIGN.md](docs/DESIGN.md)；面试问答见 [docs/INTERVIEW_QA.md](docs/INTERVIEW_QA.md)。
 
@@ -216,12 +218,33 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-覆盖：探测状态分类（真实本地监听器：open/closed/dns_error/invalid/timeout）、令牌桶数学与内存回收（可注入时钟）、任务编排（顺序、取消、背压、关停）、HTTP 层（状态码、错误信封、`X-Request-ID`、429 + `Retry-After`、异步轮询）。测试不依赖外网。
+覆盖：探测状态分类（真实本地监听器：open/closed/dns_error/invalid/timeout）、令牌桶数学与内存回收（可注入时钟）、任务编排（顺序、取消、背压、关停）、HTTP 层（状态码、错误信封、`X-Request-ID`、429 + `Retry-After`、异步轮询、413 请求体上限、OpenAPI 契约字段）。测试不依赖外网；CI 另上传 `coverage.xml` 覆盖率报告。
 
 > 环境说明：`closed` 依赖系统对未监听端口回 RST。若机器上防火墙 stealth 模式或代理软件
 > **延迟**送达 RST（实测某安全软件延迟约 2 秒），测试与冒烟脚本为 closed 目标预留了大于
 > 延迟窗口的预算（集成测试默认 3000ms、冒烟脚本 5000ms），断言仍为严格的 `closed`；
 > 若环境彻底静默丢包，返回 `timeout` 同样是诚实结果。
+
+## 性能自测（可选）
+
+```bash
+# 被测服务建议关闭限流，否则提交吞吐会被 429 限制
+RATE_LIMIT_ENABLED=false python -m uvicorn app.main:app --port 8000 --no-access-log
+python scripts/load_test.py --base-url http://127.0.0.1:8000
+```
+
+示例输出（开发机、Windows 11 + Python 3.12，仅作参考，数字随环境变化）：
+
+```text
+== 批量探测 ==
+目标数 100，任务状态 succeeded，open 100/100
+端到端耗时 31 ms，平均 0.31 ms/目标
+
+== 提交吞吐 ==
+请求 100，并发 10，202 100，429 0，503 0，墙钟 0.17s
+提交延迟 p50 14.9 ms，p95 25.6 ms，平均 15.5 ms
+提交 QPS 605 req/s
+```
 
 ## 目录结构
 

@@ -103,6 +103,9 @@ class Settings:
     rate_limit_burst: int = 10
     rate_limit_idle_ttl_seconds: float = 600.0
 
+    # 请求体大小上限（字节）：超过直接 413，避免超大 JSON 占用内存
+    max_body_bytes: int = 1_048_576
+
     def __post_init__(self) -> None:
         if self.log_level not in _LOG_LEVELS:
             raise ConfigError(
@@ -123,6 +126,8 @@ class Settings:
             or self.rate_limit_idle_ttl_seconds <= 0
         ):
             raise ConfigError("RATE_LIMIT_IDLE_TTL_SECONDS 必须是有限正数（不允许 nan/inf）")
+        if self.max_body_bytes < 1:
+            raise ConfigError("MAX_BODY_BYTES 必须为正整数")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -143,4 +148,5 @@ class Settings:
             rate_limit_idle_ttl_seconds=_read_float(
                 "RATE_LIMIT_IDLE_TTL_SECONDS", 600.0, minimum=1
             ),
+            max_body_bytes=_read_int("MAX_BODY_BYTES", 1_048_576, minimum=1),
         )

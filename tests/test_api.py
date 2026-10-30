@@ -271,3 +271,31 @@ def test_validation_rejects_ipv4_shorthand(client: TestClient) -> None:
         response = client.post("/api/v1/tasks", json={"targets": [{"host": host, "port": 80}]})
         assert response.status_code == 422, host
         assert response.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+def test_oversized_body_returns_413_envelope(client: TestClient) -> None:
+    huge = "{" + " " * 1_100_000 + "}"
+    response = client.post(
+        "/api/v1/tasks", content=huge, headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert response.headers["X-Request-ID"] == body["error"]["request_id"]
+
+
+def test_openapi_contract_covers_documented_endpoints(client: TestClient) -> None:
+    """HTTP 契约测试：served OpenAPI 必须覆盖 README 文档化的端点与关键字段。"""
+    schema = client.get("/openapi.json").json()
+
+    paths = schema["paths"]
+    assert "/api/v1/tasks" in paths
+    assert "/api/v1/tasks/{task_id}" in paths
+    assert "/healthz" in paths
+
+    create_schema = schema["components"]["schemas"]["CreateTaskRequest"]
+    assert "targets" in create_schema["required"]
+
+    task_props = schema["components"]["schemas"]["Task"]["properties"]
+    for field in ("id", "status", "total", "completed", "results", "created_at"):
+        assert field in task_props

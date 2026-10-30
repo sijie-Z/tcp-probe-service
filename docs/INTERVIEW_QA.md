@@ -107,3 +107,6 @@ DNS 慢：在预算内等，超预算按 timeout/ dns_error 收敛（区分：`g
 
 **Q30：如果再给一周，你会改什么？**
 优先级：① 鉴权 + 目标白名单（当前服务可被滥用做 SSRF/扫描）；② Redis 存储 + 队列实现多实例；③ Prometheus 指标（任务计数、探测耗时直方图、限流命中）；④ Happy Eyeballs 探测优化；⑤ 请求体大小限制与 per-tenant 配额。
+
+**Q31：为什么加了请求体大小限制？413 和 422 的边界在哪？**
+413 是传输层语义：Content-Length 超过 `MAX_BODY_BYTES`（默认 1 MiB）时，中间件在解析 JSON 之前直接拒绝，避免为超大 body 分配内存；422 是内容语义：body 大小合法但字段不合法（类型、取值、业务上限）。两者分层清晰，客户端可据此区分"请求太大"与"请求不合法"。实现只依据 Content-Length 头（常规 JSON 客户端都会发），无 Content-Length 的分块请求由 uvicorn 连接层兜底。
