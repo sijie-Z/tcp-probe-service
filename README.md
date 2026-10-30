@@ -25,6 +25,9 @@ docker compose up -d --build
 curl http://127.0.0.1:8000/healthz
 ```
 
+> Dockerfile 默认使用清华 PyPI 镜像构建（国内网络更快，容器直连 pypi.org 常超时）；
+> 海外/内网环境可覆盖：`docker build --build-arg PIP_INDEX_URL=https://pypi.org/simple -t tcp-probe-service:latest .`
+
 ### 方式二：本地 Python（3.10+）
 
 ```bash
